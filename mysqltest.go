@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"database/sql"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"time"
@@ -52,7 +51,7 @@ func (m *Mysqld) Stop() {
 }
 
 func (m *Mysqld) start() error {
-	cmd, port, err := m.dockerRunCommand()
+	cmd, err := m.dockerRunCommand()
 	if err != nil {
 		return err
 	}
@@ -63,7 +62,6 @@ func (m *Mysqld) start() error {
 	}
 
 	m.container = container
-	m.port = port
 
 	if inDockerContainer() {
 		o, err := exec.Command("docker", "inspect", "--format={{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", m.container).Output()
@@ -71,8 +69,15 @@ func (m *Mysqld) start() error {
 			return err
 		}
 		m.host = string(chomp(o))
+		m.port = "3306"
 	} else {
+		o, err := exec.Command("docker", "inspect", "--format={{range $p, $conf := .NetworkSettings.Ports}}{{ if eq $p \"3306/tcp\" }}{{(index $conf 0).HostPort}}{{end}}{{end}}", m.container).Output()
+		if err != nil {
+			fmt.Printf("%#v\n", err)
+			return err
+		}
 		m.host = "127.0.0.1"
+		m.port = string(chomp(o))
 	}
 
 	timeout := time.NewTimer(time.Second * m.config.Timeout)
@@ -98,29 +103,22 @@ func (m *Mysqld) start() error {
 	}
 }
 
-func (m *Mysqld) dockerRunCommand() (*exec.Cmd, string, error) {
+func (m *Mysqld) dockerRunCommand() (*exec.Cmd, error) {
 	var args = []string{"run"}
-	var port string
 	if inDockerContainer() {
 		o, err := exec.Command("docker", "inspect", "--format={{.HostConfig.NetworkMode}}", os.Getenv("HOSTNAME")).Output()
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		network := chomp(o)
 		args = append(args, "--network", string(network))
-		port = "3306"
 	} else {
-		forward, err := emptyPort()
-		if err != nil {
-			return nil, "", err
-		}
-		args = append(args, "-p", fmt.Sprintf("%s:3306", forward))
-		port = forward
+		args = append(args, "-p", ":3306")
 	}
 	args = append(args, "-e", "MYSQL_ALLOW_EMPTY_PASSWORD=1")
 	args = append(args, "-e", "MYSQL_DATABASE=test")
 	args = append(args, "-d", m.config.Tag)
-	return exec.Command("docker", args...), port, nil
+	return exec.Command("docker", args...), nil
 }
 
 func inDockerContainer() bool {
@@ -134,19 +132,6 @@ func killCointainer(id string) error {
 
 func removeContainer(id string) error {
 	return exec.Command("docker", "rm", "-v", id).Run()
-}
-
-func emptyPort() (string, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
-	}
-	_, port, err := net.SplitHostPort(l.Addr().String())
-	if err != nil {
-		return "", err
-	}
-	l.Close()
-	return port, nil
 }
 
 func chomp(v []byte) []byte {
